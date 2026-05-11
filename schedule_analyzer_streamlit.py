@@ -582,9 +582,7 @@ with left_col:
         schedule_text = st.text_area(
             "Manual CSV schedule text",
             height=320,
-            placeholder="Employee,Day,Start,End,Role
-Lisa Rodriguez,WED,09:00 AM,05:30 PM,Center Manager
-Cynthia Razo,WED,08:15 AM,04:45 PM,Shift Supervisor",
+            placeholder="Employee,Day,Start,End,Role\\nLisa Rodriguez,WED,09:00 AM,05:30 PM,Center Manager\\nCynthia Razo,WED,08:15 AM,04:45 PM,Shift Supervisor",
             label_visibility="collapsed",
         )
         st.caption("Required columns: Employee, Day, Start, End, Role. Days should be WED, THU, FRI, SAT, SUN, MON, TUE.")
