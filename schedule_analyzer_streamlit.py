@@ -118,26 +118,86 @@ def parse_gusto_paste(raw_text: str) -> List[Shift]:
     """
     Best-effort parser for copied Gusto weekly schedules.
 
-    Expected pattern:
-    Employee Name
-    shift line
-    role line
-    shift line
-    role line
+    This version handles two paste styles:
+    1. Tab/table paste from Gusto, where each employee row has 7 day columns.
+    2. Plain line-by-line paste, where employee names and shift blocks appear vertically.
 
-    Because copied tables can be messy, the parser walks line by line and assigns
-    shifts to the current employee and the next available day in order.
+    The tab/table version is preferred because it preserves blank days.
     """
-    lines = [line.strip() for line in raw_text.splitlines() if line.strip()]
     shifts: List[Shift] = []
-
-    current_employee = None
-    day_index_by_employee: Dict[str, int] = {}
-
     time_pattern = re.compile(
         r"(\d{1,2}:\d{2}\s*[AP]M)\s*-\s*(\d{1,2}:\d{2}\s*[AP]M)",
         re.IGNORECASE,
     )
+
+    role_pattern = re.compile(r"(Center Manager|Shift Supervisor|Sales Associate|Notary|Manager)", re.IGNORECASE)
+
+    def clean_cell(cell: str) -> str:
+        return re.sub(r"\s+", " ", cell.strip())
+
+    def parse_cell(employee: str, day: str, cell: str) -> None:
+        cell = clean_cell(cell)
+        if not cell:
+            return
+
+        matches = list(time_pattern.finditer(cell))
+        if not matches:
+            return
+
+        for idx, match in enumerate(matches):
+            start = parse_time(match.group(1))
+            end = parse_time(match.group(2))
+            if not start or not end:
+                continue
+
+            role_search_area = cell[match.end():]
+            if idx + 1 < len(matches):
+                role_search_area = cell[match.end():matches[idx + 1].start()]
+
+            role_match = role_pattern.search(role_search_area)
+            role = role_match.group(1).title() if role_match else "Unknown"
+
+            shifts.append(
+                Shift(
+                    employee=employee,
+                    day=day,
+                    start=start,
+                    end=end,
+                    role=role,
+                )
+            )
+
+    # Preferred parser: tab/table paste from Gusto.
+    raw_lines = [line.rstrip("
+") for line in raw_text.splitlines() if line.strip()]
+    table_lines = [line for line in raw_lines if "	" in line]
+
+    if table_lines:
+        for line in table_lines:
+            parts = [p.strip() for p in line.split("	")]
+            joined = " ".join(parts)
+
+            if any(x in joined for x in ["Schedule for", "America/Los_Angeles", "WED", "THU", "FRI", "SAT", "SUN", "MON", "TUE", "May 13"]):
+                continue
+
+            if len(parts) >= 2 and len(parts[0].split()) >= 2:
+                employee = parts[0]
+                day_cells = parts[1:8]
+
+                while len(day_cells) < 7:
+                    day_cells.append("")
+
+                for day, cell in zip(DAY_ORDER, day_cells):
+                    parse_cell(employee, day, cell)
+
+        if shifts:
+            return shifts
+
+    # Backup parser: plain line-by-line paste.
+    # This cannot perfectly preserve blank days if Gusto removes tabs.
+    lines = [line.strip() for line in raw_text.splitlines() if line.strip()]
+    current_employee = None
+    day_index_by_employee: Dict[str, int] = {}
 
     skip_keywords = [
         "Schedule for",
@@ -183,8 +243,8 @@ def parse_gusto_paste(raw_text: str) -> List[Shift]:
             i += 2
             continue
 
-        # Treat likely name lines as employee names.
-        if not match and len(line.split()) >= 2 and not line.lower().endswith("associate") and "manager" not in line.lower() and "supervisor" not in line.lower():
+        lower_line = line.lower()
+        if not match and len(line.split()) >= 2 and not lower_line.endswith("associate") and "manager" not in lower_line and "supervisor" not in lower_line:
             current_employee = line
             day_index_by_employee.setdefault(current_employee, 0)
 
@@ -292,23 +352,145 @@ def analyze_schedule(shifts: List[Shift], store_tier: str, qualifications: pd.Da
 # Streamlit UI
 # -----------------------------
 
-st.set_page_config(page_title="Schedule Analyzer", layout="wide")
+st.set_page_config(
+    page_title="Schedule Analyzer",
+    page_icon="📅",
+    layout="wide",
+)
 
-st.title("Store Schedule Analyzer")
-st.caption("Paste a Gusto weekly schedule and quickly flag coverage, preferred shifts, notary gaps, live scan gaps, and admin day concerns.")
+st.markdown(
+    """
+    <style>
+    .main {
+        background-color: #f7f9fc;
+    }
+    .block-container {
+        padding-top: 2rem;
+        padding-bottom: 2rem;
+        max-width: 1400px;
+    }
+    .hero-card {
+        background: linear-gradient(135deg, #0f172a 0%, #1e3a8a 55%, #2563eb 100%);
+        color: white;
+        padding: 28px 32px;
+        border-radius: 22px;
+        margin-bottom: 22px;
+        box-shadow: 0 12px 35px rgba(15, 23, 42, 0.18);
+    }
+    .hero-title {
+        font-size: 34px;
+        font-weight: 800;
+        margin-bottom: 6px;
+    }
+    .hero-subtitle {
+        font-size: 16px;
+        color: #dbeafe;
+        margin-bottom: 0px;
+    }
+    .metric-card {
+        background: white;
+        padding: 18px 20px;
+        border-radius: 18px;
+        border: 1px solid #e5e7eb;
+        box-shadow: 0 8px 20px rgba(15, 23, 42, 0.06);
+    }
+    .section-card {
+        background: white;
+        padding: 22px;
+        border-radius: 20px;
+        border: 1px solid #e5e7eb;
+        box-shadow: 0 8px 20px rgba(15, 23, 42, 0.05);
+        margin-bottom: 18px;
+    }
+    .small-muted {
+        color: #64748b;
+        font-size: 14px;
+    }
+    .good-pill {
+        background-color: #dcfce7;
+        color: #166534;
+        padding: 6px 12px;
+        border-radius: 999px;
+        font-weight: 700;
+        font-size: 13px;
+    }
+    .warn-pill {
+        background-color: #fef3c7;
+        color: #92400e;
+        padding: 6px 12px;
+        border-radius: 999px;
+        font-weight: 700;
+        font-size: 13px;
+    }
+    .bad-pill {
+        background-color: #fee2e2;
+        color: #991b1b;
+        padding: 6px 12px;
+        border-radius: 999px;
+        font-weight: 700;
+        font-size: 13px;
+    }
+    div[data-testid="stMetric"] {
+        background: white;
+        padding: 16px;
+        border-radius: 18px;
+        border: 1px solid #e5e7eb;
+        box-shadow: 0 8px 20px rgba(15, 23, 42, 0.05);
+    }
+    div[data-testid="stTextArea"] textarea {
+        border-radius: 16px;
+    }
+    .stButton > button {
+        border-radius: 999px;
+        padding: 0.7rem 1.4rem;
+        font-weight: 700;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+st.markdown(
+    """
+    <div class="hero-card">
+        <div class="hero-title">Store Schedule Analyzer</div>
+        <p class="hero-subtitle">
+            Paste a Gusto weekly schedule and quickly review staffing coverage, preferred shift structure,
+            notary/live scan gaps, closing strength, and admin day concerns.
+        </p>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
 with st.sidebar:
-    st.header("Store Setup")
-    selected_store = st.selectbox("Store", list(STORE_TIERS.keys()))
+    st.markdown("### Store Setup")
+    selected_store = st.selectbox("Select Store", list(STORE_TIERS.keys()))
     store_tier = STORE_TIERS[selected_store]
-    st.info(f"Selected tier: {store_tier.title()}")
 
-    st.header("Employee Qualifications")
-    st.write("Update this table before running the analysis.")
+    if store_tier == "busy":
+        st.success("Busy Store Standard: higher staffing target")
+    else:
+        st.info("Mid-Volume Store Standard")
+
+    st.markdown("---")
+    st.markdown("### Coverage Rules")
+    st.caption("Weekdays: 8:30 AM–6:30 PM")
+    st.caption("Saturday: 9:00 AM–5:00 PM")
+    st.caption("Sunday: 10:00 AM–3:00 PM")
+    st.caption("Preferred weekday service coverage: 9 AM–6 PM")
+
+    st.markdown("---")
+    st.markdown("### Employee Qualifications")
+    st.caption("Check notary/live scan boxes before analyzing.")
 
     default_qualifications = pd.DataFrame(
         {
-            "Employee": ["Anthony Gomez", "Ashley DeProsPo", "Eduardo Ramos", "Jenny Aguilar", "Jordan Taylor", "Lisa Rodriguez", "Cynthia Razo", "Amanda Flores", "Bella Espinoza", "Natalia Aguilar", "Nora Morehouse", "Sienna Gonzalez"],
+            "Employee": [
+                "Anthony Gomez", "Ashley DeProsPo", "Eduardo Ramos", "Jenny Aguilar", "Jordan Taylor",
+                "Lisa Rodriguez", "Cynthia Razo", "Amanda Flores", "Bella Espinoza", "Natalia Aguilar",
+                "Nora Morehouse", "Sienna Gonzalez"
+            ],
             "Notary": [False] * 12,
             "Live Scan": [False] * 12,
         }
@@ -318,21 +500,53 @@ with st.sidebar:
         default_qualifications,
         num_rows="dynamic",
         use_container_width=True,
+        hide_index=True,
     )
 
-schedule_text = st.text_area(
-    "Paste schedule here",
-    height=300,
-    placeholder="Paste the copied Gusto schedule text here...",
-)
+left_col, right_col = st.columns([1.4, 0.8], gap="large")
 
-analyze_button = st.button("Analyze Schedule", type="primary")
+with left_col:
+    st.markdown("<div class='section-card'>", unsafe_allow_html=True)
+    st.subheader("Paste Schedule")
+    st.caption("Tip: Copy the full Gusto schedule table when possible so blank days stay in place.")
+    schedule_text = st.text_area(
+        "Gusto schedule text",
+        height=320,
+        placeholder="Paste the copied Gusto schedule text here...",
+        label_visibility="collapsed",
+    )
+    analyze_button = st.button("Analyze Schedule", type="primary", use_container_width=True)
+    st.markdown("</div>", unsafe_allow_html=True)
+
+with right_col:
+    st.markdown("<div class='section-card'>", unsafe_allow_html=True)
+    st.subheader("Preferred Shift Templates")
+    st.markdown(
+        """
+        - **8:15 AM – 1:30 PM**
+        - **8:30 AM – 4:30 PM**
+        - **10:30 AM – 6:00 PM**
+        - **11:30 AM – 6:45 PM**
+        - **1:30 PM – 6:45 PM**
+        """
+    )
+    st.markdown("<p class='small-muted'>The app allows a small time tolerance so close matches are not over-flagged.</p>", unsafe_allow_html=True)
+    st.markdown("</div>", unsafe_allow_html=True)
+
+
+def grade_badge(grade: str) -> str:
+    if grade == "Strong":
+        return "<span class='good-pill'>Strong</span>"
+    if grade == "Covered, Review":
+        return "<span class='warn-pill'>Covered, Review</span>"
+    return "<span class='bad-pill'>Needs Attention</span>"
+
 
 if analyze_button:
     shifts = parse_gusto_paste(schedule_text)
 
     if not shifts:
-        st.error("No shifts were detected. Try pasting the full text version of the Gusto schedule.")
+        st.error("No shifts were detected. Try copying the full Gusto table again, then paste it here.")
     else:
         shift_rows = [
             {
@@ -348,27 +562,105 @@ if analyze_button:
         shift_df = pd.DataFrame(shift_rows)
         report_df = analyze_schedule(shifts, store_tier, qualifications)
 
-        st.subheader("Schedule Grade by Day")
-        st.dataframe(report_df, use_container_width=True)
+        strong_days = int((report_df["Grade"] == "Strong").sum())
+        review_days = int((report_df["Grade"] == "Covered, Review").sum())
+        attention_days = int((report_df["Grade"] == "Needs Attention").sum())
+        total_shifts = len(shift_df)
+        avg_people = round(report_df["Total People"].mean(), 1)
 
-        st.subheader("Parsed Shifts")
-        st.dataframe(shift_df, use_container_width=True)
+        st.markdown("### Weekly Snapshot")
+        m1, m2, m3, m4, m5 = st.columns(5)
+        m1.metric("Store", selected_store)
+        m2.metric("Avg People/Day", avg_people)
+        m3.metric("Strong Days", strong_days)
+        m4.metric("Review Days", review_days)
+        m5.metric("Needs Attention", attention_days)
 
-        st.subheader("Quick Notes")
-        weak_days = report_df[report_df["Grade"] != "Strong"]
-        if weak_days.empty:
-            st.success("Schedule looks strong overall based on current rules.")
-        else:
-            for _, row in weak_days.iterrows():
-                st.warning(f"{row['Day']}: {row['Warnings']}")
+        st.markdown("### Daily Coverage Cards")
+        card_cols = st.columns(7)
+        for idx, (_, row) in enumerate(report_df.iterrows()):
+            with card_cols[idx]:
+                st.markdown("<div class='metric-card'>", unsafe_allow_html=True)
+                st.markdown(f"#### {row['Day']}")
+                st.markdown(grade_badge(row["Grade"]), unsafe_allow_html=True)
+                st.markdown(f"**People:** {row['Total People']} / {row['Target Min']}")
+                st.markdown(f"**Open:** {row['Opening Coverage']}")
+                st.markdown(f"**Close:** {row['Closing Coverage']}")
+                st.markdown(f"**Shift Match:** {row['Preferred Shift Match %']}%")
+                st.markdown("</div>", unsafe_allow_html=True)
 
-        csv = report_df.to_csv(index=False).encode("utf-8")
-        st.download_button(
-            "Download Report CSV",
-            data=csv,
-            file_name=f"{selected_store.replace(' ', '_')}_schedule_analysis.csv",
-            mime="text/csv",
-        )
+        tab1, tab2, tab3, tab4 = st.tabs(["Coverage Report", "Action Items", "Parsed Shifts", "Export"])
+
+        with tab1:
+            st.markdown("#### Full Daily Report")
+            st.dataframe(
+                report_df,
+                use_container_width=True,
+                hide_index=True,
+            )
+
+        with tab2:
+            st.markdown("#### Items to Review")
+            weak_days = report_df[report_df["Grade"] != "Strong"]
+            if weak_days.empty:
+                st.success("Schedule looks strong overall based on current rules.")
+            else:
+                for _, row in weak_days.iterrows():
+                    st.warning(f"{row['Day']}: {row['Warnings']}")
+
+            st.markdown("#### Service Coverage")
+            notary_issues = report_df[report_df["Notary Gaps"] != "None / Not Checked"]
+            live_scan_issues = report_df[report_df["Live Scan Gaps"] != "None / Not Checked"]
+
+            if notary_issues.empty and live_scan_issues.empty:
+                st.success("No notary or live scan gaps detected based on checked qualifications.")
+            else:
+                if not notary_issues.empty:
+                    st.error("Notary coverage gaps detected. Check the Coverage Report tab for times.")
+                if not live_scan_issues.empty:
+                    st.error("Live Scan coverage gaps detected. Check the Coverage Report tab for times.")
+
+        with tab3:
+            st.markdown("#### Parsed Shifts")
+            st.caption("Use this tab to verify the app read the schedule correctly before trusting the report.")
+            st.dataframe(
+                shift_df,
+                use_container_width=True,
+                hide_index=True,
+            )
+
+        with tab4:
+            csv = report_df.to_csv(index=False).encode("utf-8")
+            st.download_button(
+                "Download Coverage Report CSV",
+                data=csv,
+                file_name=f"{selected_store.replace(' ', '_')}_schedule_analysis.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
+
+            shift_csv = shift_df.to_csv(index=False).encode("utf-8")
+            st.download_button(
+                "Download Parsed Shifts CSV",
+                data=shift_csv,
+                file_name=f"{selected_store.replace(' ', '_')}_parsed_shifts.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
 
 else:
-    st.info("Paste a schedule above, update qualifications if needed, then click Analyze Schedule.")
+    st.markdown(
+        """
+        <div class="section-card">
+            <h3>How to use this</h3>
+            <p class="small-muted">
+                1. Select the store from the sidebar.<br>
+                2. Check which employees are notaries or live scan trained.<br>
+                3. Paste the Gusto weekly schedule.<br>
+                4. Click Analyze Schedule.<br>
+                5. Review the Daily Coverage Cards and Action Items tab.
+            </p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
