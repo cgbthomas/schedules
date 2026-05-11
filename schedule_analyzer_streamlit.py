@@ -114,6 +114,47 @@ def build_time_checks(kind: str) -> List[time]:
 # Schedule parsing
 # -----------------------------
 
+def parse_manual_csv(raw_text: str) -> List[Shift]:
+    """
+    Parses a simple manual CSV format:
+    Employee,Day,Start,End,Role
+    Lisa Rodriguez,WED,09:00 AM,05:30 PM,Center Manager
+    """
+    shifts: List[Shift] = []
+    if not raw_text.strip():
+        return shifts
+
+    try:
+        from io import StringIO
+        df = pd.read_csv(StringIO(raw_text))
+    except Exception:
+        return shifts
+
+    required_cols = {"Employee", "Day", "Start", "End", "Role"}
+    if not required_cols.issubset(set(df.columns)):
+        return shifts
+
+    for _, row in df.iterrows():
+        employee = str(row["Employee"]).strip()
+        day = str(row["Day"]).strip().upper()
+        start = parse_time(str(row["Start"]))
+        end = parse_time(str(row["End"]))
+        role = str(row["Role"]).strip()
+
+        if employee and day in DAY_ORDER and start and end:
+            shifts.append(
+                Shift(
+                    employee=employee,
+                    day=day,
+                    start=start,
+                    end=end,
+                    role=role,
+                )
+            )
+
+    return shifts
+
+
 def parse_gusto_paste(raw_text: str) -> List[Shift]:
     """
     Best-effort parser for copied Gusto weekly schedules.
@@ -256,6 +297,21 @@ def parse_gusto_paste(raw_text: str) -> List[Shift]:
 # Analysis logic
 # -----------------------------
 
+def is_leadership_role(role: str) -> bool:
+    role_lower = role.lower()
+    return "center manager" in role_lower or "shift supervisor" in role_lower or role_lower == "manager"
+
+
+def employee_has_service_qualification(employee: str, role: str, qualification: str, qual_map: Dict) -> bool:
+    """
+    Center Managers and Shift Supervisors automatically count as Notary + Live Scan.
+    Sales Associates only count if checked in the qualification table.
+    """
+    if is_leadership_role(role):
+        return True
+    return bool(qual_map.get(employee, {}).get(qualification, False))
+
+
 def analyze_day(day: str, shifts: List[Shift], store_tier: str, qualifications: pd.DataFrame) -> Dict:
     kind = DAY_TO_KIND[day]
     daily_shifts = [s for s in shifts if s.day == day]
@@ -292,9 +348,15 @@ def analyze_day(day: str, shifts: List[Shift], store_tier: str, qualifications: 
         service_checks = [t for t in checks if service_start <= t < service_end]
 
         for check in service_checks:
-            active_employees = [s.employee for s in daily_shifts if s.start <= check < s.end]
-            notary_count = sum(1 for e in active_employees if bool(qual_map.get(e, {}).get("Notary", False)))
-            live_scan_count = sum(1 for e in active_employees if bool(qual_map.get(e, {}).get("Live Scan", False)))
+            active_shifts = [s for s in daily_shifts if s.start <= check < s.end]
+            notary_count = sum(
+                1 for s in active_shifts
+                if employee_has_service_qualification(s.employee, s.role, "Notary", qual_map)
+            )
+            live_scan_count = sum(
+                1 for s in active_shifts
+                if employee_has_service_qualification(s.employee, s.role, "Live Scan", qual_map)
+            )
 
             if notary_count == 0:
                 notary_gap_times.append(check.strftime("%I:%M %p").lstrip("0"))
@@ -481,7 +543,7 @@ with st.sidebar:
 
     st.markdown("---")
     st.markdown("### Employee Qualifications")
-    st.caption("Check notary/live scan boxes before analyzing.")
+    st.caption("Center Managers and Shift Supervisors auto-count as Notary + Live Scan. Only check boxes for Sales Associates who are trained.")
 
     default_qualifications = pd.DataFrame(
         {
@@ -507,13 +569,35 @@ left_col, right_col = st.columns([1.4, 0.8], gap="large")
 with left_col:
     st.markdown("<div class='section-card'>", unsafe_allow_html=True)
     st.subheader("Paste Schedule")
-    st.caption("Tip: Copy the full Gusto schedule table when possible so blank days stay in place.")
-    schedule_text = st.text_area(
-        "Gusto schedule text",
-        height=320,
-        placeholder="Paste the copied Gusto schedule text here...",
-        label_visibility="collapsed",
+    st.caption("Best option: use Manual CSV mode below. Gusto copy/paste sometimes removes blank day columns.")
+
+    input_mode = st.radio(
+        "Input Mode",
+        ["Manual CSV", "Gusto Copy/Paste"],
+        horizontal=True,
+        help="Manual CSV is more reliable. Gusto Copy/Paste only works if tabs/table spacing are preserved.",
     )
+
+    if input_mode == "Manual CSV":
+        schedule_text = st.text_area(
+            "Manual CSV schedule text",
+            height=320,
+            placeholder="Employee,Day,Start,End,Role
+Lisa Rodriguez,WED,09:00 AM,05:30 PM,Center Manager
+Cynthia Razo,WED,08:15 AM,04:45 PM,Shift Supervisor",
+            label_visibility="collapsed",
+        )
+        st.caption("Required columns: Employee, Day, Start, End, Role. Days should be WED, THU, FRI, SAT, SUN, MON, TUE.")
+    else:
+        schedule_text = st.text_area(
+            "Gusto schedule text",
+            height=320,
+            placeholder="Paste the copied Gusto schedule text here...",
+            label_visibility="collapsed",
+        )
+        if schedule_text and "	" not in schedule_text:
+            st.warning("This paste does not appear to include table tabs. Blank days may not be preserved, so results may be inaccurate. Use Manual CSV mode for best results.")
+
     analyze_button = st.button("Analyze Schedule", type="primary", use_container_width=True)
     st.markdown("</div>", unsafe_allow_html=True)
 
@@ -542,10 +626,13 @@ def grade_badge(grade: str) -> str:
 
 
 if analyze_button:
-    shifts = parse_gusto_paste(schedule_text)
+    if input_mode == "Manual CSV":
+        shifts = parse_manual_csv(schedule_text)
+    else:
+        shifts = parse_gusto_paste(schedule_text)
 
     if not shifts:
-        st.error("No shifts were detected. Try copying the full Gusto table again, then paste it here.")
+        st.error("No shifts were detected. If Gusto paste is not reading correctly, switch to Manual CSV mode and use columns: Employee, Day, Start, End, Role.")
     else:
         shift_rows = [
             {
