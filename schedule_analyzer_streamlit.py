@@ -168,8 +168,7 @@ def parse_gusto_paste(raw_text: str) -> List[Shift]:
             )
 
     # Preferred parser: tab/table paste from Gusto.
-    raw_lines = [line.rstrip("
-") for line in raw_text.splitlines() if line.strip()]
+    raw_lines = [line.rstrip("\n") for line in raw_text.splitlines() if line.strip()]
     table_lines = [line for line in raw_lines if "	" in line]
 
     if table_lines:
