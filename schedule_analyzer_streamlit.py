@@ -573,9 +573,9 @@ with left_col:
 
     input_mode = st.radio(
         "Input Mode",
-        ["Manual CSV", "Gusto Copy/Paste"],
+        ["Manual CSV", "Gusto Converter", "Gusto Copy/Paste"],
         horizontal=True,
-        help="Manual CSV is more reliable. Gusto Copy/Paste only works if tabs/table spacing are preserved.",
+        help="Manual CSV is most reliable. Gusto Converter will try to turn Gusto text into CSV first. Gusto Copy/Paste only works if tabs/table spacing are preserved.",
     )
 
     if input_mode == "Manual CSV":
@@ -586,6 +586,16 @@ with left_col:
             label_visibility="collapsed",
         )
         st.caption("Required columns: Employee, Day, Start, End, Role. Days should be WED, THU, FRI, SAT, SUN, MON, TUE.")
+    elif input_mode == "Gusto Converter":
+        schedule_text = st.text_area(
+            "Gusto text to convert",
+            height=320,
+            placeholder="Paste the copied Gusto schedule text here. The app will try to convert it into CSV first.",
+            label_visibility="collapsed",
+        )
+        st.caption("Converter mode creates a CSV-style Parsed Shifts table first. Review the Parsed Shifts tab before trusting the coverage report.")
+        if schedule_text and "\t" not in schedule_text:
+            st.warning("This paste does not appear to include table tabs. The converter may need manual day corrections.")
     else:
         schedule_text = st.text_area(
             "Gusto schedule text",
@@ -626,6 +636,8 @@ def grade_badge(grade: str) -> str:
 if analyze_button:
     if input_mode == "Manual CSV":
         shifts = parse_manual_csv(schedule_text)
+    elif input_mode == "Gusto Converter":
+        shifts = parse_gusto_paste(schedule_text)
     else:
         shifts = parse_gusto_paste(schedule_text)
 
@@ -673,7 +685,7 @@ if analyze_button:
                 st.markdown(f"**Shift Match:** {row['Preferred Shift Match %']}%")
                 st.markdown("</div>", unsafe_allow_html=True)
 
-        tab1, tab2, tab3, tab4 = st.tabs(["Coverage Report", "Action Items", "Parsed Shifts", "Export"])
+        tab1, tab2, tab3, tab4, tab5 = st.tabs(["Coverage Report", "Action Items", "Parsed Shifts", "CSV Converter", "Export"])
 
         with tab1:
             st.markdown("#### Full Daily Report")
@@ -714,6 +726,12 @@ if analyze_button:
             )
 
         with tab4:
+            st.markdown("#### Converted CSV")
+            st.caption("Copy this CSV into Manual CSV mode if you want to review or correct the days before analyzing again.")
+            converted_csv_text = shift_df[["Employee", "Day", "Start", "End", "Role"]].to_csv(index=False)
+            st.code(converted_csv_text, language="csv")
+
+        with tab5:
             csv = report_df.to_csv(index=False).encode("utf-8")
             st.download_button(
                 "Download Coverage Report CSV",
